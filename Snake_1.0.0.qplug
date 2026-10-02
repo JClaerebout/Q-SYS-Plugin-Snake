@@ -1,0 +1,249 @@
+PluginInfo = {
+  Name = "Games~Snake",
+  Version = "1.0.0",
+  BuildVersion = "1.0.0.0",
+  Id = "f45b1765-c8d4-49ef-a2a0-f8606223b319",
+  Author = "Jens Claerebout",
+  Description = "Classic Snake game rendered as dynamic SVG",
+  ShowDebug = false
+}
+
+function GetProperties()
+  return {}
+end
+
+function GetColor(props)
+  return {39, 130, 79}
+end
+
+function GetPrettyName(props)
+  return "Snake " .. PluginInfo.Version
+end
+
+function GetControls(props)
+  local controls = {
+    {Name="Display", ControlType="Button", ButtonType="Toggle", UserPin=false, Count=1},
+    {Name="Pause", ControlType="Button", ButtonType="Toggle", UserPin=true, PinStyle="Both", Count=1},
+    {Name="Speed", ControlType="Knob", ControlUnit="Integer", Min=1, Max=10,
+      DefaultValue=4, UserPin=true, PinStyle="Both", Count=1}
+  }
+  for _, name in ipairs({"Up", "Down", "Left", "Right", "Start"}) do
+    table.insert(controls, {Name=name, ControlType="Button", ButtonType="Trigger",
+      UserPin=true, PinStyle="Input", Count=1})
+  end
+  for _, name in ipairs({"Score", "HighScore", "Status"}) do
+    table.insert(controls, {Name=name, ControlType="Text", UserPin=true, PinStyle="Output", Count=1})
+  end
+  return controls
+end
+
+function GetControlLayout(props)
+  local layout = {}
+  local graphics = {
+    {Type="GroupBox", Text="Snake", Position={5,5}, Size={650,625},
+      Fill={232,235,239}, StrokeWidth=1, CornerRadius=8},
+    {Type="Text", Text="Speed", Position={490,465}, Size={80,18}, FontSize=11},
+    {Type="Text", Text="Score", Position={245,550}, Size={90,18}, FontSize=11},
+    {Type="Text", Text="Best this session", Position={350,550}, Size={125,18}, FontSize=11},
+    {Type="Text", Text="Eat the red food. Avoid the walls and your tail.",
+      Position={25,602}, Size={600,18}, FontSize=11}
+  }
+  layout.Display = {
+    PrettyName="Game~Display", Style="Button", ButtonStyle="Toggle",
+    Position={25,32}, Size={610,420}, Margin=0, Padding=0,
+    Color={24,44,36}, UnlinkOffColor=true, OffColor={24,44,36}
+  }
+  local function button(name, legend, x, y, width, style, color)
+    layout[name] = {PrettyName="Game~" .. legend, Legend=legend, Style="Button",
+      ButtonStyle=style or "Trigger", Position={x,y}, Size={width,36},
+      Color=color or {39,130,79}}
+  end
+  button("Up", "Up", 90, 465, 65)
+  button("Left", "Left", 25, 506, 65)
+  button("Right", "Right", 155, 506, 65)
+  button("Down", "Down", 90, 547, 65)
+  button("Start", "Start / Restart", 245, 478, 135)
+  button("Pause", "Pause", 390, 478, 80, "Toggle", {218,156,44})
+  layout.Speed = {PrettyName="Game~Speed", Style="Knob", Position={500,487},
+    Size={60,60}, ShowTextbox=true}
+  layout.Score = {PrettyName="Status~Score", Style="Text", Position={245,570},
+    Size={90,24}, IsReadOnly=true}
+  layout.HighScore = {PrettyName="Status~High Score", Style="Text", Position={350,570},
+    Size={90,24}, IsReadOnly=true}
+  layout.Status = {PrettyName="Status~State", Style="Text", Position={245,521},
+    Size={225,24}, IsReadOnly=true}
+
+  return layout, graphics
+end
+
+if Controls then
+  local rapidjson = require("rapidjson")
+  local COLS, ROWS, CELL = 24, 16, 23
+  local BOARD_X, BOARD_Y = 29, 38
+  local snake, food
+  local direction = {x=1, y=0}
+  local turns = {}
+  local state = "Ready"
+  local score, highScore = 0, 0
+  local directions = {
+    Up={x=0,y=-1}, Down={x=0,y=1}, Left={x=-1,y=0}, Right={x=1,y=0}
+  }
+
+  -- Global reference keeps the Q-SYS timer alive.
+  SnakeGameTimer = Timer.New()
+
+  local function interval()
+    local speed = math.max(1, math.min(10, math.floor(Controls.Speed.Value + 0.5)))
+    return 0.40 - (speed - 1) * 0.035
+  end
+
+  local function placeFood()
+    local occupied, empty = {}, {}
+    for _, segment in ipairs(snake) do
+      occupied[segment.y * COLS + segment.x] = true
+    end
+    -- Choose from free cells so a nearly full board cannot stall the script.
+    for y=0,ROWS-1 do
+      for x=0,COLS-1 do
+        if not occupied[y * COLS + x] then
+          empty[#empty+1] = {x=x, y=y}
+        end
+      end
+    end
+    food = #empty > 0 and empty[math.random(#empty)] or nil
+  end
+
+  local function redraw()
+    local svg = {
+      '<svg xmlns="http://www.w3.org/2000/svg" width="610" height="420" viewBox="0 0 610 420">',
+      '<rect width="610" height="420" rx="18" fill="#182C24"/>',
+      '<text x="29" y="26" font-family="Arial" font-size="19" font-weight="bold" fill="#BFE88B">SNAKE</text>',
+      string.format('<text x="581" y="25" text-anchor="end" font-family="Arial" font-size="14" fill="#D8E9CE">SCORE %d   BEST %d</text>', score, highScore),
+      '<rect x="27" y="36" width="556" height="372" rx="3" fill="#A7BA86"/>'
+    }
+    for x=0,COLS do
+      svg[#svg+1] = string.format('<path d="M%d 38 v368" stroke="#95AA74" stroke-width="0.5"/>', BOARD_X+x*CELL)
+    end
+    for y=0,ROWS do
+      svg[#svg+1] = string.format('<path d="M29 %d h552" stroke="#95AA74" stroke-width="0.5"/>', BOARD_Y+y*CELL)
+    end
+    if food then
+      svg[#svg+1] = string.format('<circle cx="%.1f" cy="%.1f" r="8" fill="#C63E38"/>',
+        BOARD_X+(food.x+0.5)*CELL, BOARD_Y+(food.y+0.5)*CELL)
+    end
+    for i=#snake,1,-1 do
+      local segment = snake[i]
+      svg[#svg+1] = string.format('<rect x="%d" y="%d" width="21" height="21" rx="5" fill="%s"/>',
+        BOARD_X+segment.x*CELL+1, BOARD_Y+segment.y*CELL+1, i==1 and "#153D2A" or "#36714A")
+    end
+    local head = snake[1]
+    local cx = BOARD_X+(head.x+0.5)*CELL+direction.x*5
+    local cy = BOARD_Y+(head.y+0.5)*CELL+direction.y*5
+    for _, side in ipairs({-1,1}) do
+      svg[#svg+1] = string.format('<circle cx="%.1f" cy="%.1f" r="2" fill="#E8F3CF"/>',
+        cx-direction.y*side*4, cy+direction.x*side*4)
+    end
+    if state ~= "Playing" then
+      local hint = state == "Ready" and "Press Start to play"
+        or state == "Paused" and "Press Pause to resume"
+        or "Press Start to play again"
+      svg[#svg+1] = '<rect x="125" y="166" width="360" height="100" rx="12" fill="#182C24" fill-opacity="0.94"/>'
+      svg[#svg+1] = string.format('<text x="305" y="207" text-anchor="middle" font-family="Arial" font-size="28" font-weight="bold" fill="#D5EDB2">%s</text>', state)
+      svg[#svg+1] = string.format('<text x="305" y="239" text-anchor="middle" font-family="Arial" font-size="16" fill="#D8E9CE">%s</text>', hint)
+    end
+    svg[#svg+1] = '</svg>'
+    Controls.Score.String = tostring(score)
+    Controls.HighScore.String = tostring(highScore)
+    Controls.Status.String = state
+    Controls.Display.Legend = rapidjson.encode({DrawChrome=false,
+      IconData=Crypto.Base64Encode(table.concat(svg))})
+  end
+
+  local function reset()
+    snake = {{x=6,y=8}, {x=5,y=8}, {x=4,y=8}}
+    direction = {x=1,y=0}
+    turns = {}
+    score = 0
+    Controls.Pause.Boolean = false
+    placeFood()
+  end
+
+  local function finish(result)
+    SnakeGameTimer:Stop()
+    state = result
+    turns = {}
+    redraw()
+  end
+
+  SnakeGameTimer.EventHandler = function()
+    if state ~= "Playing" then return end
+    if #turns > 0 then direction = table.remove(turns, 1) end
+    local head = {x=snake[1].x+direction.x, y=snake[1].y+direction.y}
+    if head.x < 0 or head.x >= COLS or head.y < 0 or head.y >= ROWS then
+      finish("Game Over")
+      return
+    end
+    local eating = food and head.x == food.x and head.y == food.y
+    -- The last cell is safe when the tail moves away on this same tick.
+    for i=1,#snake-(eating and 0 or 1) do
+      if snake[i].x == head.x and snake[i].y == head.y then
+        finish("Game Over")
+        return
+      end
+    end
+    table.insert(snake, 1, head)
+    if eating then
+      score = score + 10
+      highScore = math.max(highScore, score)
+      placeFood()
+      if not food then
+        finish("You Win!")
+        return
+      end
+    else
+      table.remove(snake)
+    end
+    redraw()
+  end
+
+  for name, vector in pairs(directions) do
+    local requested = vector
+    Controls[name].EventHandler = function()
+      if state ~= "Playing" or #turns >= 2 then return end
+      local previous = turns[#turns] or direction
+      -- Buffer two corners, rejecting reversals and repeated directions.
+      if requested.x * previous.x + requested.y * previous.y ~= 0 then return end
+      turns[#turns+1] = requested
+    end
+  end
+
+  Controls.Start.EventHandler = function()
+    SnakeGameTimer:Stop()
+    state = "Ready"
+    reset()
+    state = "Playing"
+    redraw()
+    SnakeGameTimer:Start(interval())
+  end
+  Controls.Pause.EventHandler = function()
+    if state == "Playing" and Controls.Pause.Boolean then
+      state = "Paused"
+      SnakeGameTimer:Stop()
+    elseif state == "Paused" and not Controls.Pause.Boolean then
+      state = "Playing"
+      SnakeGameTimer:Start(interval())
+    else
+      Controls.Pause.Boolean = state == "Paused"
+    end
+    redraw()
+  end
+  Controls.Speed.EventHandler = function()
+    if state == "Playing" then SnakeGameTimer:Start(interval()) end
+  end
+  Controls.Display.EventHandler = function()
+    Controls.Display.Boolean = false
+  end
+
+  reset()
+  redraw()
+end
