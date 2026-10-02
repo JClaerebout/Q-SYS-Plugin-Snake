@@ -1,7 +1,8 @@
+BuildVersion = "1.0.0.0"
+
 PluginInfo = {
-  Name = "Games~Snake",
-  Version = "1.0.0",
-  BuildVersion = "1.0.0.0",
+  Name = "Games~Snake v" .. BuildVersion,
+  Version = BuildVersion,
   Id = "f45b1765-c8d4-49ef-a2a0-f8606223b319",
   Author = "Jens Claerebout",
   Description = "Classic Snake game rendered as dynamic SVG",
